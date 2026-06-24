@@ -14,9 +14,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// acrTokenUsername is the well-known username used for token-based ACR logins.
-const acrTokenUsername = "00000000-0000-0000-0000-000000000000"
-
 // resolveContainerEngine returns the container engine CLI to use. It honors the
 // RLE_CONTAINER_ENGINE override and otherwise prefers docker, falling back to
 // podman. Both expose a docker-compatible CLI surface for the subcommands used
@@ -78,84 +75,6 @@ func containerStop(ctx context.Context, engine string, containerID string) error
 		return fmt.Errorf("stop container %s: %w", containerID, err)
 	}
 	return nil
-}
-
-// containerPush pushes a tagged image to its registry.
-func containerPush(cmd *cobra.Command, engine string, image string) error {
-	return runStreamingCommand(cmd, "", engine, "push", image)
-}
-
-// acrLogin authenticates the container engine to the given ACR registry. It
-// fetches a short-lived access token with the Azure CLI and pipes it to the
-// engine's login command, which works for both docker and podman.
-func acrLogin(cmd *cobra.Command, engine string, registry string) error {
-	if _, err := exec.LookPath("az"); err != nil {
-		return &azdext.LocalError{
-			Message:    "Could not find \"az\" on PATH.",
-			Code:       "rle_az_not_found",
-			Category:   azdext.LocalErrorCategoryUser,
-			Suggestion: "Install the Azure CLI and run 'az login', then try again.",
-		}
-	}
-
-	tokenOut, err := exec.CommandContext( //nolint:gosec // Args are fixed plus a resolved registry name.
-		cmd.Context(), "az", "acr", "login", "--name", registry, "--expose-token", "--output", "tsv", "--query", "accessToken",
-	).Output()
-	if err != nil {
-		return &azdext.LocalError{
-			Message:    fmt.Sprintf("Failed to obtain an ACR access token for %q.", registry),
-			Code:       "rle_acr_token_failed",
-			Category:   azdext.LocalErrorCategoryUser,
-			Suggestion: "Run 'az login' and ensure you have access to the registry, then try again.",
-		}
-	}
-	token := strings.TrimSpace(string(tokenOut))
-
-	loginServer := registry
-	if !strings.Contains(loginServer, ".") {
-		loginServer = registry + ".azurecr.io"
-	}
-
-	login := exec.CommandContext( //nolint:gosec // Engine resolved; args fixed plus resolved login server.
-		cmd.Context(), engine, "login", loginServer,
-		"--username", acrTokenUsername, "--password-stdin",
-	)
-	login.Stdin = strings.NewReader(token)
-	login.Stdout = cmd.OutOrStdout()
-	login.Stderr = cmd.ErrOrStderr()
-	if err := login.Run(); err != nil {
-		return fmt.Errorf("%s login %s: %w", engine, loginServer, err)
-	}
-	return nil
-}
-
-// registryFromImage extracts the registry login server (e.g. "myacr.azurecr.io")
-// from a fully-qualified image reference. It returns an empty string when the
-// image has no registry host component (e.g. "echo_env:latest").
-func registryFromImage(image string) string {
-	slash := strings.IndexByte(image, '/')
-	if slash < 0 {
-		return ""
-	}
-	host := image[:slash]
-	if strings.ContainsAny(host, ".:") {
-		return host
-	}
-	return ""
-}
-
-// acrNameFromImage returns the ACR resource name (the portion before the first
-// dot of the login server) for an image hosted in *.azurecr.io. It returns an
-// empty string when the image is not an ACR reference.
-func acrNameFromImage(image string) string {
-	host := registryFromImage(image)
-	if host == "" {
-		return ""
-	}
-	if !strings.Contains(host, ".azurecr.io") {
-		return ""
-	}
-	return strings.SplitN(host, ".", 2)[0]
 }
 
 func runStreamingCommand(cmd *cobra.Command, dir string, name string, args ...string) error {

@@ -5,15 +5,21 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"strings"
 
+	"github.com/azure/azure-dev/cli/azd/pkg/azdext"
 	"github.com/spf13/cobra"
 )
 
 type rleDeployFlags struct {
 	project   string
+	image     string
+	registry  string
 	skipBuild bool
-	skipPush  bool
 }
 
 func newDeployCommand() *cobra.Command {
@@ -21,22 +27,96 @@ func newDeployCommand() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "deploy",
-		Short: "Build, push to ACR, and register the RLE environment",
+		Short: "Create or update the RLE environment",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			state, err := loadSessionState()
+			// Load the persisted session state. When .azd-rle.json is absent we treat this as a
+			// first-time bootstrap and initialize the state in-place (it is persisted on success),
+			// so `deploy` can run without a prior `init` as long as the folder has an rle.yaml.
+			state, err := loadRleState()
+			initialized := err == nil
 			if err != nil {
+				if localErr, ok := errors.AsType[*azdext.LocalError](err); !ok ||
+					localErr.Code != "rle_project_not_initialized" {
+					return err
+				}
+			}
+
+			manifest, err := loadRleManifest(rleManifestFile)
+			manifestExists := err == nil
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
 				return err
+			}
+
+			if !initialized && !manifestExists {
+				return &azdext.LocalError{
+					Message:  "RLE session has not been initialized.",
+					Code:     "rle_project_not_initialized",
+					Category: azdext.LocalErrorCategoryUser,
+					Suggestion: "Run azd ai rle init <env-name> first, or add an " + rleManifestFile +
+						" manifest to this folder, then re-run deploy.",
+				}
+			}
+
+			if !initialized {
+				state = defaultRleState("", defaultRecipeName)
+				if _, err := fmt.Fprintf(
+					cmd.OutOrStdout(),
+					"No %s found; initializing a new RLE session from %s.\n",
+					rleStateFile,
+					rleManifestFile,
+				); err != nil {
+					return err
+				}
+			}
+
+			if manifestExists {
+				manifestState, err := stateFromManifest(manifest)
+				if err != nil {
+					return err
+				}
+				state.Name = firstNonEmpty(manifestState.Name, state.Name)
+				state.Account = firstNonEmpty(manifestState.Account, state.Account)
+				state.Project = firstNonEmpty(manifestState.Project, state.Project)
+				state.Endpoint = firstNonEmpty(manifestState.Endpoint, state.Endpoint)
+				state.Image = firstNonEmpty(manifestState.Image, state.Image)
 			}
 			state.Project = firstNonEmpty(flags.project, state.Project)
 
-			image, err := resolveSessionImage(state)
+			// Resolve the image to deploy. Priority: --image flag, then the manifest/state
+			// image, then a per-environment default derived from the environment name so each
+			// environment gets its own repository in the target registry.
+			image, err := resolveRecipeImage(state.Recipe, firstNonEmpty(flags.image, state.Image))
 			if err != nil {
 				return err
 			}
-
-			if err := buildAndPushImage(cmd, image, flags); err != nil {
-				return err
+			if image == "" {
+				if state.Name == "" {
+					return &azdext.LocalError{
+						Message:    "Unable to determine the environment image.",
+						Code:       "rle_image_required",
+						Category:   azdext.LocalErrorCategoryUser,
+						Suggestion: "Pass --image <reference> or set the environment name so a default image can be derived.",
+					}
+				}
+				image = defaultRegistryLoginServer + "/" + slug(state.Name) + ":latest"
 			}
+
+			// Host-qualify the image so the control plane / ADC can pull it: the disk-image
+			// conversion uses the image reference verbatim as the pull source, so a bare
+			// "name:tag" is rewritten to "<registry-login-server>/name:tag".
+			loginServer, repoTag := splitImageHost(image)
+			if loginServer == "" {
+				loginServer = normalizeRegistryLoginServer(flags.registry)
+			}
+			if loginServer == "" {
+				return &azdext.LocalError{
+					Message:    "No container registry was specified for the environment image.",
+					Code:       "rle_registry_required",
+					Category:   azdext.LocalErrorCategoryUser,
+					Suggestion: "Pass --registry <name> (e.g. devrle) or use a host-qualified image reference.",
+				}
+			}
+			image = loginServer + "/" + repoTag
 
 			environmentId := firstNonEmpty(state.EnvironmentId, slug(state.Name))
 			client := newRleClient(resolveControlPlaneEndpoint(""))
@@ -50,6 +130,43 @@ func newDeployCommand() *cobra.Command {
 			action := "Creating"
 			if !created {
 				action = "Updating"
+			}
+
+			// Build the local Dockerfile and push it to the registry before registering, so the
+			// environment always points at an image that actually exists in the target ACR.
+			registryName := registryShortName(loginServer)
+			switch {
+			case flags.skipBuild:
+				if _, err := fmt.Fprintf(cmd.OutOrStdout(),
+					"Skipping build (--skip-build); using image '%s'.\n", image); err != nil {
+					return err
+				}
+			case !fileExists("Dockerfile"):
+				if _, err := fmt.Fprintf(cmd.OutOrStdout(),
+					"No Dockerfile in current directory; skipping build and using image '%s'.\n", image); err != nil {
+					return err
+				}
+			default:
+				if _, err := fmt.Fprintf(cmd.OutOrStdout(),
+					"Building and pushing '%s' to registry '%s' (az acr build) ...\n",
+					repoTag, registryName); err != nil {
+					return err
+				}
+				build := exec.CommandContext(cmd.Context(),
+					"az", "acr", "build", "--registry", registryName, "--image", repoTag, ".")
+				build.Stdout = cmd.OutOrStdout()
+				build.Stderr = cmd.ErrOrStderr()
+				if err := build.Run(); err != nil {
+					return &azdext.LocalError{
+						Message: fmt.Sprintf(
+							"Failed to build and push image '%s' to registry '%s': %v",
+							repoTag, registryName, err),
+						Code:     "rle_acr_build_failed",
+						Category: azdext.LocalErrorCategoryUser,
+						Suggestion: "Ensure 'az login' is done, you have push access to the registry, " +
+							"and a valid Dockerfile is present. Use --skip-build to register a prebuilt image.",
+					}
+				}
 			}
 
 			if _, err := fmt.Fprintf(cmd.OutOrStdout(), "%s environment '%s' (image=%s) ...\n", action, state.Name, image); err != nil {
@@ -111,52 +228,56 @@ func newDeployCommand() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&flags.project, "project", "", "RLE project name. Defaults to the project saved in .azd-rle.json.")
-	cmd.Flags().BoolVar(&flags.skipBuild, "skip-build", false, "Skip building the container image and reuse the existing image.")
-	cmd.Flags().BoolVar(&flags.skipPush, "skip-push", false, "Skip pushing the image to ACR (only register with the control plane).")
+	cmd.Flags().StringVar(&flags.project, "project", "",
+		"RLE project name. Defaults to the project saved in .azd-rle.json.")
+	cmd.Flags().StringVar(&flags.image, "image", "",
+		"Image reference to deploy (overrides the per-environment default derived from the environment name)")
+	cmd.Flags().StringVar(&flags.registry, "registry", "devrle",
+		"Container registry (short name or login server) to build and push the environment image into")
+	cmd.Flags().BoolVar(&flags.skipBuild, "skip-build", false,
+		"Skip building/pushing the image and register the existing image reference as-is")
 	return cmd
 }
 
-// buildAndPushImage builds the session image and pushes it to its ACR registry
-// before the environment is registered with the control plane. Building and
-// pushing require a container engine (docker or podman); when
-// --skip-build/--skip-push are set or the image is not an ACR reference, the
-// corresponding step is skipped.
-func buildAndPushImage(cmd *cobra.Command, image string, flags *rleDeployFlags) error {
-	if flags.skipBuild && flags.skipPush {
-		fmt.Fprintf(cmd.OutOrStdout(), "Skipping build and push; using existing image '%s'.\n", image)
-		return nil
-	}
-
-	engine, err := resolveContainerEngine()
-	if err != nil {
-		return err
-	}
-
-	if !flags.skipBuild {
-		fmt.Fprintf(cmd.OutOrStdout(), "Building image '%s' with %s ...\n", image, engine)
-		if err := containerBuild(cmd, engine, image, "."); err != nil {
-			return err
+// splitImageHost splits a container image reference into its registry host (login server)
+// and the remaining repository:tag. The leading segment is treated as a host only when it
+// looks like one (contains '.' or ':' or is "localhost"); otherwise there is no host.
+func splitImageHost(image string) (host string, repoTag string) {
+	image = strings.TrimSpace(image)
+	if slash := strings.IndexByte(image, '/'); slash > 0 {
+		first := image[:slash]
+		if first == "localhost" || strings.ContainsAny(first, ".:") {
+			return first, image[slash+1:]
 		}
 	}
+	return "", image
+}
 
-	if flags.skipPush {
-		fmt.Fprintf(cmd.OutOrStdout(), "Skipping push; image '%s' was not pushed to ACR.\n", image)
-		return nil
-	}
-
-	registry := acrNameFromImage(image)
+// normalizeRegistryLoginServer turns a registry short name ("devrle") into a login server
+// ("devrle.azurecr.io"). A value that already contains a '.' is assumed to be a login server.
+func normalizeRegistryLoginServer(registry string) string {
+	registry = strings.TrimSpace(registry)
 	if registry == "" {
-		fmt.Fprintf(cmd.OutOrStdout(), "Image '%s' is not an ACR reference; skipping ACR login and push.\n", image)
-		return nil
+		return ""
 	}
+	if strings.Contains(registry, ".") {
+		return registry
+	}
+	return registry + ".azurecr.io"
+}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "Logging in to ACR '%s' ...\n", registry)
-	if err := acrLogin(cmd, engine, registry); err != nil {
-		return err
+// registryShortName returns the ACR short name (the part before ".azurecr.io") for use with
+// "az acr build --registry".
+func registryShortName(loginServer string) string {
+	if host, _, ok := strings.Cut(loginServer, "."); ok {
+		return host
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "Pushing image '%s' ...\n", image)
-	return containerPush(cmd, engine, image)
+	return loginServer
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
 
 type environmentOutput struct {

@@ -115,14 +115,7 @@ func runInvokeLocal(cmd *cobra.Command, flags *rleInvokeFlags) error {
 }
 
 func runInvokeDocker(cmd *cobra.Command, flags *rleInvokeFlags) error {
-	if err := ensureLocalImageEnv(""); err != nil {
-		return err
-	}
-	state, err := loadSessionState()
-	if err != nil {
-		return err
-	}
-	image, err := resolveSessionImage(state)
+	image, err := resolveLocalImage("")
 	if err != nil {
 		return err
 	}

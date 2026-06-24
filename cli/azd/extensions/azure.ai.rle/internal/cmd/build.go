@@ -20,21 +20,9 @@ func newBuildCommand() *cobra.Command {
 		Use:   "build",
 		Short: "Build the RLE environment container image locally",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := ensureLocalImageEnv(flags.image); err != nil {
-				return err
-			}
-
-			state, err := loadSessionState()
+			image, err := resolveLocalImage(flags.image)
 			if err != nil {
 				return err
-			}
-
-			image := flags.image
-			if image == "" {
-				image, err = resolveSessionImage(state)
-				if err != nil {
-					return err
-				}
 			}
 
 			engine, err := resolveContainerEngine()

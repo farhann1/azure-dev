@@ -8,31 +8,57 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/azure/azure-dev/cli/azd/pkg/azdext"
 )
 
-// ensureLocalImageEnv makes the local build/invoke flows usable without an ACR
-// image configured. When image is provided it takes precedence; otherwise an
-// existing RLE_ACR_IMAGE is kept, and as a last resort a local tag derived from
-// the session folder name is used so manifest expansion succeeds.
-func ensureLocalImageEnv(image string) error {
-	if image != "" {
-		return os.Setenv("RLE_ACR_IMAGE", image)
+// resolveLocalImage resolves an image reference for the local build/invoke
+// flows, which run against a local container engine and therefore do not need a
+// registry-qualified reference. Priority: explicit override, then the
+// manifest/state image, then a local tag derived from the environment (or
+// folder) name. It also seeds a default RLE_ACR_IMAGE so legacy manifests that
+// still reference ${RLE_ACR_IMAGE} continue to load.
+func resolveLocalImage(override string) (string, error) {
+	if override != "" {
+		if err := os.Setenv("RLE_ACR_IMAGE", override); err != nil {
+			return "", err
+		}
+	} else if _, ok := os.LookupEnv("RLE_ACR_IMAGE"); !ok {
+		if err := os.Setenv("RLE_ACR_IMAGE", localImageFromDir()); err != nil {
+			return "", err
+		}
 	}
-	if _, ok := os.LookupEnv("RLE_ACR_IMAGE"); ok {
-		return nil
+
+	state, err := loadSessionState()
+	if err != nil {
+		return "", err
 	}
+
+	if override != "" {
+		return override, nil
+	}
+	if image, err := resolveRecipeImage(state.Recipe, state.Image); err == nil && image != "" {
+		return image, nil
+	}
+
+	name := state.Name
+	if name == "" {
+		return localImageFromDir(), nil
+	}
+	return slug(name) + ":latest", nil
+}
+
+// localImageFromDir derives a local image tag from the current folder name.
+func localImageFromDir() string {
 	dir, err := os.Getwd()
 	if err != nil {
-		return err
+		return "rle-env:latest"
 	}
-	tag := strings.ToLower(filepath.Base(dir))
-	if tag == "" || tag == "." || tag == string(filepath.Separator) {
+	tag := slug(filepath.Base(dir))
+	if tag == "" {
 		tag = "rle-env"
 	}
-	return os.Setenv("RLE_ACR_IMAGE", tag+":latest")
+	return tag + ":latest"
 }
 
 
@@ -63,12 +89,6 @@ func loadSessionState() (rleState, error) {
 	}
 
 	return state, nil
-}
-
-// resolveSessionImage resolves the container image reference for the session,
-// preferring the recipe/manifest image and falling back to RLE_ACR_IMAGE.
-func resolveSessionImage(state rleState) (string, error) {
-	return resolveRecipeImage(state.Recipe, state.Image)
 }
 
 // requireDeployedEnvironment returns a user error when the session has not been

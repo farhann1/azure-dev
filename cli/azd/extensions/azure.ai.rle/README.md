@@ -37,17 +37,21 @@ cd cli\azd\extensions\azure.ai.rle
 
 ```powershell
 $env:RLE_ENDPOINT = "http://localhost:5000"
-$env:RLE_ACR_IMAGE = "devrle.azurecr.io/coding_env:latest"
+$env:RLE_PROJECT_NAME = "demo-3"
 ```
 
-`http://localhost:5000` is also the built-in default, so you can omit `RLE_ENDPOINT` when using a local RLE control plane.
-`RLE_ACR_IMAGE` is required by deploy and is expanded from the generated `rle.yaml`.
+`http://localhost:5000` is also the built-in default, so you can omit `RLE_ENDPOINT` when using a local RLE control plane. To target the hosted control plane, set `RLE_ENDPOINT` to its URL.
 
 For `invoke`, provide the Azure AI project endpoint as a parameter:
 
 ```powershell
 az login
 ```
+
+The environment image is no longer configured through an environment variable. By default,
+`deploy` registers a per-environment image named after the environment (for example
+`devrle.azurecr.io/code-rl:latest`). Use `--image <reference>` to deploy a specific prebuilt
+image instead.
 
 ### 4. Install the extension into azd
 
@@ -122,9 +126,10 @@ azd ai rle build
 azd ai rle invoke --target docker
 ```
 
-`build` builds the image from the session folder using the image tag
-resolved from `rle.yaml`/`RLE_ACR_IMAGE`. `invoke --target docker` runs that
-image locally, waits for `/health`, and opens the same interactive session.
+`build` builds the image from the session folder. By default the local image is
+tagged from the environment name (or pass `--image <tag>`). `invoke --target
+docker` runs that image locally, waits for `/health`, and opens the same
+interactive session.
 
 The container engine is auto-detected: `docker` is preferred, and `podman` is
 used as a fallback. Set `RLE_CONTAINER_ENGINE` (for example
@@ -136,10 +141,13 @@ used as a fallback. Set `RLE_CONTAINER_ENGINE` (for example
 azd ai rle deploy --project omi-build-demo-uae
 ```
 
-`deploy` builds the image, logs in to the image's ACR registry, pushes it, and
-then creates or updates the RLE environment on the control plane. The project
-and environment id/version are saved locally in `.azd-rle.json`. Use
-`--skip-build` and/or `--skip-push` to reuse an image that is already in ACR.
+`deploy` builds and pushes the image directly in ACR with `az acr build` (no
+local container engine required), then creates or updates the RLE environment on
+the control plane. By default it targets the `--registry` (default `devrle`) and
+an image derived from the environment name; pass `--image <reference>` to deploy
+a specific prebuilt image. The project and environment id/version are saved
+locally in `.azd-rle.json`. Use `--skip-build` to register an existing image
+reference as-is.
 
 ### 9. Test the deployed environment
 
