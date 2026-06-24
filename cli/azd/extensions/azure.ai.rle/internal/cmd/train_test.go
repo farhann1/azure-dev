@@ -11,11 +11,11 @@ import (
 	"testing"
 )
 
-func TestBuildLoomInvokeArgsUsesStateAndFlags(t *testing.T) {
+func TestBuildLoomTrainArgsUsesStateAndFlags(t *testing.T) {
 	state := rleState{
 		EnvironmentId: "env-123",
 	}
-	flags := &rleInvokeFlags{
+	flags := &rleTrainFlags{
 		projectEndpoint:            "https://example.services.ai.azure.com/api/projects/p",
 		numTasks:                   4,
 		modelName:                  "Qwen/Qwen3-32B",
@@ -32,7 +32,7 @@ func TestBuildLoomInvokeArgsUsesStateAndFlags(t *testing.T) {
 		removeConstantRewardGroups: true,
 	}
 
-	args := buildLoomInvokeArgs(state, "demo-3", "https://rle.example", flags)
+	args := buildLoomTrainArgs(state, "demo-3", "https://rle.example", flags)
 
 	expected := []string{
 		"project_endpoint=https://example.services.ai.azure.com/api/projects/p",
@@ -60,16 +60,16 @@ func TestBuildLoomInvokeArgsUsesStateAndFlags(t *testing.T) {
 	}
 }
 
-func TestBuildLoomInvokeArgsOmitsMaxStepsWhenZero(t *testing.T) {
+func TestBuildLoomTrainArgsOmitsMaxStepsWhenZero(t *testing.T) {
 	state := rleState{
 		EnvironmentId: "env-123",
 	}
-	flags := &rleInvokeFlags{
+	flags := &rleTrainFlags{
 		projectEndpoint: "https://example.services.ai.azure.com/api/projects/p",
 		maxSteps:        0,
 	}
 
-	args := buildLoomInvokeArgs(state, "demo-3", "http://localhost:5000", flags)
+	args := buildLoomTrainArgs(state, "demo-3", "http://localhost:5000", flags)
 
 	if slices.Contains(args, "max_steps=0") {
 		t.Fatalf("expected max_steps to be omitted, got %#v", args)

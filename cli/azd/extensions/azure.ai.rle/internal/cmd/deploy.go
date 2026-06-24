@@ -5,15 +5,15 @@ package cmd
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
-	"os"
 
 	"github.com/spf13/cobra"
 )
 
 type rleDeployFlags struct {
-	project string
+	project   string
+	skipBuild bool
+	skipPush  bool
 }
 
 func newDeployCommand() *cobra.Command {
@@ -21,32 +21,20 @@ func newDeployCommand() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "deploy",
-		Short: "Create or update the RLE environment",
+		Short: "Build, push to ACR, and register the RLE environment",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			state, err := loadRleState()
+			state, err := loadSessionState()
 			if err != nil {
 				return err
-			}
-
-			manifest, err := loadRleManifest(rleManifestFile)
-			if err != nil && !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
-			if err == nil {
-				manifestState, err := stateFromManifest(manifest)
-				if err != nil {
-					return err
-				}
-				state.Name = firstNonEmpty(manifestState.Name, state.Name)
-				state.Account = firstNonEmpty(manifestState.Account, state.Account)
-				state.Project = firstNonEmpty(manifestState.Project, state.Project)
-				state.Endpoint = firstNonEmpty(manifestState.Endpoint, state.Endpoint)
-				state.Image = firstNonEmpty(manifestState.Image, state.Image)
 			}
 			state.Project = firstNonEmpty(flags.project, state.Project)
 
-			image, err := resolveRecipeImage(state.Recipe, state.Image)
+			image, err := resolveSessionImage(state)
 			if err != nil {
+				return err
+			}
+
+			if err := buildAndPushImage(cmd, image, flags); err != nil {
 				return err
 			}
 
@@ -62,10 +50,6 @@ func newDeployCommand() *cobra.Command {
 			action := "Creating"
 			if !created {
 				action = "Updating"
-			}
-
-			if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Skipping build; using existing image '%s'.\n", image); err != nil {
-				return err
 			}
 
 			if _, err := fmt.Fprintf(cmd.OutOrStdout(), "%s environment '%s' (image=%s) ...\n", action, state.Name, image); err != nil {
@@ -128,7 +112,51 @@ func newDeployCommand() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&flags.project, "project", "", "RLE project name. Defaults to the project saved in .azd-rle.json.")
+	cmd.Flags().BoolVar(&flags.skipBuild, "skip-build", false, "Skip building the container image and reuse the existing image.")
+	cmd.Flags().BoolVar(&flags.skipPush, "skip-push", false, "Skip pushing the image to ACR (only register with the control plane).")
 	return cmd
+}
+
+// buildAndPushImage builds the session image and pushes it to its ACR registry
+// before the environment is registered with the control plane. Building and
+// pushing require a container engine (docker or podman); when
+// --skip-build/--skip-push are set or the image is not an ACR reference, the
+// corresponding step is skipped.
+func buildAndPushImage(cmd *cobra.Command, image string, flags *rleDeployFlags) error {
+	if flags.skipBuild && flags.skipPush {
+		fmt.Fprintf(cmd.OutOrStdout(), "Skipping build and push; using existing image '%s'.\n", image)
+		return nil
+	}
+
+	engine, err := resolveContainerEngine()
+	if err != nil {
+		return err
+	}
+
+	if !flags.skipBuild {
+		fmt.Fprintf(cmd.OutOrStdout(), "Building image '%s' with %s ...\n", image, engine)
+		if err := containerBuild(cmd, engine, image, "."); err != nil {
+			return err
+		}
+	}
+
+	if flags.skipPush {
+		fmt.Fprintf(cmd.OutOrStdout(), "Skipping push; image '%s' was not pushed to ACR.\n", image)
+		return nil
+	}
+
+	registry := acrNameFromImage(image)
+	if registry == "" {
+		fmt.Fprintf(cmd.OutOrStdout(), "Image '%s' is not an ACR reference; skipping ACR login and push.\n", image)
+		return nil
+	}
+
+	fmt.Fprintf(cmd.OutOrStdout(), "Logging in to ACR '%s' ...\n", registry)
+	if err := acrLogin(cmd, engine, registry); err != nil {
+		return err
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Pushing image '%s' ...\n", image)
+	return containerPush(cmd, engine, image)
 }
 
 type environmentOutput struct {

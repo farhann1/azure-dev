@@ -89,38 +89,94 @@ azd ai rle init code_rl
 
 Init creates a local session folder named `code_rl`, including an OpenEnv-style FastAPI package, `Dockerfile`, `rle.yaml`, and azd-managed dependencies under `.azd-rle\deps`.
 
-Deploy from the session folder:
+Run the rest of the commands from inside the session folder:
 
 ```powershell
 cd .\code_rl
+```
+
+### 6. Test locally (no Docker)
+
+```powershell
+azd ai rle invoke
+```
+
+`invoke` starts the FastAPI server with `uvicorn` and opens an interactive
+OpenEnv session so you can drive the environment by hand:
+
+```text
+rle> reset
+rle> step {"message": "hello"}
+rle> state
+rle> quit
+```
+
+Install the environment requirements first (for example
+`pip install -r requirements.txt`) so `uvicorn` is available on the interpreter
+azd launches.
+
+### 7. Build and test the container image
+
+```powershell
+azd ai rle build
+azd ai rle invoke --target docker
+```
+
+`build` builds the image from the session folder using the image tag
+resolved from `rle.yaml`/`RLE_ACR_IMAGE`. `invoke --target docker` runs that
+image locally, waits for `/health`, and opens the same interactive session.
+
+The container engine is auto-detected: `docker` is preferred, and `podman` is
+used as a fallback. Set `RLE_CONTAINER_ENGINE` (for example
+`RLE_CONTAINER_ENGINE=podman`) to force a specific engine.
+
+### 8. Deploy (push to ACR + register with the control plane)
+
+```powershell
 azd ai rle deploy --project omi-build-demo-uae
 ```
 
-Deploy creates or updates the RLE environment and saves the project plus environment id/version locally in `.azd-rle.json`.
+`deploy` builds the image, logs in to the image's ACR registry, pushes it, and
+then creates or updates the RLE environment on the control plane. The project
+and environment id/version are saved locally in `.azd-rle.json`. Use
+`--skip-build` and/or `--skip-push` to reuse an image that is already in ACR.
 
-### 6. Run Loom training
+### 9. Test the deployed environment
 
 ```powershell
-azd ai rle invoke `
+azd ai rle invoke --target remote
+```
+
+`invoke --target remote` leases an instance from the control plane for the
+deployed environment and opens the interactive session against the data-plane
+endpoint. Pass `--keep-instance` to leave the instance running after you exit.
+
+### 10. Run Loom training (optional, hidden command)
+
+Training is intentionally separate from the test/deploy flow above and is
+exposed through the hidden `train` command:
+
+```powershell
+azd ai rle train `
   --recipe code_rl_with_rle `
   --project-endpoint "https://omi-build-demo-uae.services.ai.azure.com/api/projects/omi-build-demo-uae"
 ```
 
-Invoke runs the selected Loom recipe's `train_azure.py` entrypoint with values from `.azd-rle.json`.
+`train` runs the selected Loom recipe's `train_azure.py` entrypoint with values from `.azd-rle.json`.
 It passes the deployed RLE environment id, project, and control-plane endpoint to the Loom recipe,
 which uses `rle_sdk` to lease sandboxes and call `reset`/`step` during training.
 
-Invoke fetches Loom branch `code_rl_with_rle` into `.azd-rle\recipes\loom`
+Train fetches Loom branch `code_rl_with_rle` into `.azd-rle\recipes\loom`
 and uses the RLE SDK wheel copied by `init`. You do not need a separate local Loom checkout
 or a separately installed RLE SDK package. The managed Git checkout is shallow, single-branch,
 and tagless (`--depth 1 --single-branch --no-tags`). In the future this recipe dependency can
 move from Git to a published package.
 
-After fetching Loom, invoke patches only the managed copy of `loom-cookbook\pyproject.toml`
+After fetching Loom, train patches only the managed copy of `loom-cookbook\pyproject.toml`
 so `uv` resolves `azure-ai-finetuning-sessions` from the fetched Loom checkout and `rle-sdk`
 from `.azd-rle\deps`.
 
-The default invoke settings are:
+The default training settings are:
 
 ```text
 num_tasks=4
@@ -141,7 +197,7 @@ remove_constant_reward_groups=true
 Override the recipe, task count, or model with flags, for example:
 
 ```powershell
-azd ai rle invoke `
+azd ai rle train `
   --recipe code_rl_with_rle `
   --project-endpoint "https://omi-build-demo-uae.services.ai.azure.com/api/projects/omi-build-demo-uae" `
   --num-tasks 4 `

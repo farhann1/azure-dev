@@ -53,7 +53,7 @@ func newInitCommand() *cobra.Command {
 			}
 			_, err = fmt.Fprintf(
 				cmd.OutOrStdout(),
-				"Created OpenEnv-style environment at: %s\nNext steps:\n  cd %s\n  azd ai rle deploy\n",
+				"Created OpenEnv-style environment at: %s\nNext steps:\n  cd %s\n  azd ai rle invoke            # test locally (no Docker)\n  azd ai rle build             # build the container image\n  azd ai rle deploy            # push to ACR + register with the control plane\n",
 				displayDir,
 				displayDir,
 			)
