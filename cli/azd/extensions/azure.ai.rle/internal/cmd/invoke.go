@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -42,9 +41,9 @@ func newInvokeCommand() *cobra.Command {
 		Short: "Interactively test the RLE environment (reset/step/state)",
 		Long: "Start an interactive OpenEnv session against the environment.\n\n" +
 			"Targets:\n" +
-			"  local   Run the FastAPI server locally with uvicorn (no Docker).\n" +
-			"  docker  Run the built container image locally (requires azd ai rle build).\n" +
-			"  remote  Lease an instance from the control plane and test the deployed endpoint.",
+			"  local   Build the container image and run it locally.\n" +
+			"  docker  Run a previously built container image locally (skip build).\n" +
+			"  remote  Lease a sandbox from the control plane and test the deployed endpoint.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			switch strings.ToLower(flags.target) {
 			case invokeTargetLocal:
@@ -78,8 +77,17 @@ func runInvokeLocal(cmd *cobra.Command, flags *rleInvokeFlags) error {
 		return err
 	}
 
-	pythonExe, err := resolvePython()
+	image, err := resolveLocalImage("")
 	if err != nil {
+		return err
+	}
+	engine, err := resolveContainerEngine()
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintf(cmd.OutOrStdout(), "Building image '%s' with %s from the current session folder ...\n", image, engine)
+	if err := containerBuild(cmd, engine, image, "."); err != nil {
 		return err
 	}
 
@@ -91,22 +99,15 @@ func runInvokeLocal(cmd *cobra.Command, flags *rleInvokeFlags) error {
 		}
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "Starting local server with uvicorn on port %d ...\n", port)
-	server := exec.CommandContext( //nolint:gosec // Args are fixed plus a resolved interpreter path and numeric port.
-		cmd.Context(),
-		pythonExe, "-m", "uvicorn", "server.app:app",
-		"--host", "127.0.0.1", "--port", fmt.Sprintf("%d", port),
-	)
-	server.Stdout = cmd.ErrOrStderr()
-	server.Stderr = cmd.ErrOrStderr()
-	server.Env = os.Environ()
-	if err := server.Start(); err != nil {
-		return fmt.Errorf("start uvicorn server: %w", err)
+	fmt.Fprintf(cmd.OutOrStdout(), "Starting container from image '%s' with %s on port %d ...\n", image, engine, port)
+	containerID, err := containerRunDetached(cmd.Context(), engine, image, port)
+	if err != nil {
+		return err
 	}
 	defer func() {
-		if server.Process != nil {
-			_ = server.Process.Kill()
-			_, _ = server.Process.Wait()
+		fmt.Fprintf(cmd.OutOrStdout(), "Stopping container %s ...\n", shortID(containerID))
+		if stopErr := containerStop(context.Background(), engine, containerID); stopErr != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: %v\n", stopErr)
 		}
 	}()
 
@@ -158,28 +159,28 @@ func runInvokeRemote(cmd *cobra.Command, flags *rleInvokeFlags) error {
 	}
 
 	client := newRleClient(resolveControlPlaneEndpoint(flags.endpoint))
-	fmt.Fprintf(cmd.OutOrStdout(), "Leasing instance for environment %s ...\n", state.EnvironmentId)
-	instance, err := client.createEnvironmentInstance(
+	fmt.Fprintf(cmd.OutOrStdout(), "Creating sandbox for environment %s ...\n", state.EnvironmentId)
+	sandbox, err := client.createSandbox(
 		cmd.Context(),
 		state.Account,
 		state.Project,
 		state.EnvironmentId,
-		environmentInstanceCreateRequest{VersionLabel: state.EnvironmentVersion},
+		sandboxCreateRequest{Version: state.EnvironmentVersion},
 	)
 	if err != nil {
-		return serviceError(err)
+		return sandboxCreateError(err)
 	}
-	if strings.TrimSpace(instance.Endpoint) == "" {
+	if strings.TrimSpace(sandbox.Url) == "" {
 		return &azdext.LocalError{
-			Message:    "Control plane did not return an instance endpoint.",
-			Code:       "rle_instance_endpoint_missing",
+			Message:    "Control plane did not return a sandbox URL.",
+			Code:       "rle_sandbox_url_missing",
 			Category:   azdext.LocalErrorCategoryInternal,
 			Suggestion: "Check the control plane logs and retry.",
 		}
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "Instance %s ready at %s\n", instance.Id, instance.Endpoint)
-	return connectAndRepl(cmd, instance.Endpoint, flags)
+	fmt.Fprintf(cmd.OutOrStdout(), "Sandbox %s ready at %s\n", sandbox.Id, sandbox.Url)
+	return connectAndRepl(cmd, sandbox.Url, flags)
 }
 
 func connectAndRepl(cmd *cobra.Command, baseURL string, flags *rleInvokeFlags) error {
@@ -192,20 +193,6 @@ func connectAndRepl(cmd *cobra.Command, baseURL string, flags *rleInvokeFlags) e
 	fmt.Fprintf(cmd.OutOrStdout(), "Connected to %s\n\n", baseURL)
 
 	return runOpenEnvRepl(cmd.Context(), client, os.Stdin, cmd.OutOrStdout())
-}
-
-func resolvePython() (string, error) {
-	for _, candidate := range []string{"python3", "python"} {
-		if path, err := exec.LookPath(candidate); err == nil {
-			return path, nil
-		}
-	}
-	return "", &azdext.LocalError{
-		Message:    "Could not find \"python3\" or \"python\" on PATH.",
-		Code:       "rle_python_not_found",
-		Category:   azdext.LocalErrorCategoryUser,
-		Suggestion: "Install Python and the environment requirements (pip install -r requirements.txt), then try again.",
-	}
 }
 
 func shortID(id string) string {
