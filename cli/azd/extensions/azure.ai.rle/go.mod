@@ -4,6 +4,7 @@ go 1.26.4
 
 require (
 	github.com/azure/azure-dev/cli/azd v1.25.0
+	github.com/chzyer/readline v1.5.1
 	github.com/fatih/color v1.18.0
 	github.com/spf13/cobra v1.10.1
 	gopkg.in/yaml.v3 v3.0.1

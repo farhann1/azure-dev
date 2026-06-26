@@ -51,10 +51,12 @@ func containerBuild(cmd *cobra.Command, engine string, image string, contextDir 
 }
 
 // containerRunDetached starts a container in the background and returns its id.
-// The container's port 8000 is published to hostPort on localhost.
+// The container's port 8000 is published to hostPort on localhost. The optional
+// browser web console (/web) is enabled so it is reachable during local invoke.
 func containerRunDetached(ctx context.Context, engine string, image string, hostPort int) (string, error) {
 	args := []string{
 		"run", "--rm", "-d",
+		"-e", "ENABLE_WEB_INTERFACE=true",
 		"-p", fmt.Sprintf("127.0.0.1:%d:8000", hostPort),
 		image,
 	}

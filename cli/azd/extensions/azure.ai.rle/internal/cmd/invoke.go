@@ -112,6 +112,7 @@ func runInvokeLocal(cmd *cobra.Command, flags *rleInvokeFlags) error {
 	}()
 
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+	fmt.Fprintf(cmd.OutOrStdout(), "Web console: %s/web\n", baseURL)
 	return connectAndRepl(cmd, baseURL, flags)
 }
 
@@ -146,6 +147,7 @@ func runInvokeDocker(cmd *cobra.Command, flags *rleInvokeFlags) error {
 	}()
 
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+	fmt.Fprintf(cmd.OutOrStdout(), "Web console: %s/web\n", baseURL)
 	return connectAndRepl(cmd, baseURL, flags)
 }
 
