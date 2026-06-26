@@ -31,9 +31,10 @@ func NewRootCommand() *cobra.Command {
 		defaultHelp(cmd, args)
 	})
 
-	rootCmd.AddCommand(newDeployCommand())
 	rootCmd.AddCommand(newInitCommand())
 	rootCmd.AddCommand(newInvokeCommand())
+	rootCmd.AddCommand(newDeployCommand())
+	rootCmd.AddCommand(newTrainCommand())
 	rootCmd.AddCommand(newVersionCommand(&extCtx.OutputFormat))
 	rootCmd.AddCommand(newMetadataCommand(rootCmd))
 

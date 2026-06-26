@@ -190,8 +190,27 @@ func sandboxCreateError(err error) error {
 		}
 	}
 
+	if errors.As(err, &httpErr) {
+		message := extractRleErrorMessage(httpErr.body)
+		if isSandboxCapacityError(message) {
+			return &azdext.LocalError{
+				Message:    "RLE backend has no cluster capacity available to place the sandbox right now.",
+				Code:       "rle_sandbox_no_capacity",
+				Category:   azdext.LocalErrorCategoryUser,
+				Suggestion: "This is a transient, service-side capacity issue (not a problem with your environment). Wait a moment and retry; if it persists, try again later or contact the RLE service owners.",
+			}
+		}
+	}
+
 	return serviceError(err)
 }
+
+func isSandboxCapacityError(message string) bool {
+	lowered := strings.ToLower(message)
+	return strings.Contains(lowered, "noclustersavailable") ||
+		strings.Contains(lowered, "no clusters with sufficient capacity")
+}
+
 
 func retryableSandboxCreateError(err error) (string, bool) {
 	var httpErr *rleHTTPError
