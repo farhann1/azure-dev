@@ -15,9 +15,22 @@ import (
 func TestNewRootCommandIncludesExpectedCommands(t *testing.T) {
 	rootCmd := NewRootCommand()
 
-	for _, commandName := range []string{"deploy", "init", "invoke", "run", "version", "metadata"} {
+	for _, commandName := range []string{"deploy", "init", "invoke", "network", "run", "version", "metadata"} {
 		if command, _, err := rootCmd.Find([]string{commandName}); err != nil || command.Name() != commandName {
 			t.Fatalf("expected command %q to be registered", commandName)
+		}
+	}
+}
+
+func TestNetworkProvisionExposesTopologyFlags(t *testing.T) {
+	rootCmd := NewRootCommand()
+	command, _, err := rootCmd.Find([]string{"network", "provision"})
+	if err != nil {
+		t.Fatalf("expected network provision command to be registered: %v", err)
+	}
+	for _, flagName := range []string{"resource-group", "sandbox-image", "skip-sandbox-app", "training-subnet-prefix"} {
+		if flag := command.Flags().Lookup(flagName); flag == nil {
+			t.Fatalf("expected network provision to expose --%s", flagName)
 		}
 	}
 }

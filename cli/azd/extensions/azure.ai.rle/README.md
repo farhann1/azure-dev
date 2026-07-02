@@ -159,6 +159,36 @@ azd ai rle deploy --project-id <project-id>
 
 Deploy registers `template.environment.image` from `rle.yaml` with the RLE control plane and saves the project/environment details in `.azd-rle.json`.
 
+### 5. Provision a 1P network simulation
+
+To simulate the sovereign boundary, create an internal-only Container Apps environment inside a 1P VNet. The sandbox runtime is reachable from the training subnet, while callers outside the VNet, including the Foundry control plane, cannot call `/reset`, `/step`, or other runtime APIs.
+
+```powershell
+azd ai rle network provision `
+  --resource-group <resource-group> `
+  --location eastus2 `
+  --sandbox-image <acr-or-public-image> `
+  --sandbox-target-port 8000
+```
+
+The command creates:
+
+- a VNet with separate `training-subnet` and `sandbox-subnet`
+- an NSG on the sandbox subnet that allows sandbox ingress (`443` by default) only from the training subnet
+- an internal-only Azure Container Apps environment
+- private DNS for the internal Container Apps domain
+- an optional internal-ingress sandbox container app
+
+The JSON output includes a `runtimeEndpoint` and the control-plane override values needed for the Vienna prototype:
+
+```json
+{
+  "RLESandboxDiskImage:Provider": "static-private-endpoint",
+  "RLESandboxDiskImage:PrivateRuntimeEndpoint": "https://<private-sandbox-fqdn>",
+  "RLESandboxDiskImage:PrivateEndpointVisibility": "private_1p_vnet"
+}
+```
+
 ## Upcoming features
 
 - Remote environment invocation with `azd ai rle invoke`.

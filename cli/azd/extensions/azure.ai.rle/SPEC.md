@@ -13,6 +13,7 @@ RLE environment registration follows a manifest-first sequence:
 2. **Run locally** - `azd` pulls and runs the environment Docker image locally.
 3. **Invoke locally** - User interacts with the running OpenEnv runtime through a local shell.
 4. **Deploy/register** - `azd` registers the environment image with the RLE control plane.
+5. **Provision 1P network simulation** - `azd` can create a VNet-isolated sandbox runtime endpoint that the SDK reaches directly from a training subnet, while Foundry cannot reach runtime APIs.
 
 ---
 
@@ -37,6 +38,8 @@ azd ai rle deploy --project-id <project-id>
 ```
 
 Remote invocation, playground UI, and Foundry project provisioning are planned follow-up features.
+
+The 1P network simulation is intentionally scoped to boundary validation. It creates network resources and an optional internal sandbox app, but does not replace a production 1P policy service or ADC sandbox-group provisioning.
 
 ---
 
@@ -187,6 +190,38 @@ Example endpoint override:
 ```powershell
 $env:RLE_ENDPOINT = "https://<rle-control-plane>"
 ```
+
+---
+
+### Step 5: Provision 1P Network Simulation
+
+```powershell
+azd ai rle network provision --resource-group <resource-group> --sandbox-image <image>
+```
+
+Behavior:
+
+1. Creates a resource group if needed.
+2. Creates a VNet with `training-subnet` and `sandbox-subnet`.
+3. Delegates `sandbox-subnet` to `Microsoft.App/environments`.
+4. Applies an NSG to `sandbox-subnet`:
+   - allow sandbox runtime port from `training-subnet`
+   - deny sandbox runtime port from the rest of the VNet
+5. Creates an internal-only Azure Container Apps environment.
+6. Creates and links private DNS for the internal Container Apps domain.
+7. Optionally creates an internal-ingress sandbox app from `--sandbox-image`.
+
+The output contains the private `runtimeEndpoint` and the Vienna control-plane override values:
+
+```json
+{
+  "RLESandboxDiskImage:Provider": "static-private-endpoint",
+  "RLESandboxDiskImage:PrivateRuntimeEndpoint": "https://<private-sandbox-fqdn>",
+  "RLESandboxDiskImage:PrivateEndpointVisibility": "private_1p_vnet"
+}
+```
+
+The boundary invariant is that Foundry brokers the lease but does not proxy or probe sandbox runtime APIs. The SDK must run from the 1P training network and call the returned private endpoint directly.
 
 ---
 
